@@ -239,9 +239,9 @@ FFmpegBridgeContext* ffmpbr_init(
   FFmpegBridgeContext *br_ctx = av_malloc(sizeof(FFmpegBridgeContext));
 
   // defaults -- likely not overridden
-  br_ctx->video_codec_id = CODEC_ID_H264;
-  br_ctx->video_pix_fmt = PIX_FMT_YUV420P;
-  br_ctx->audio_codec_id = CODEC_ID_AAC;
+  br_ctx->video_codec_id = AV_CODEC_ID_H264;
+  br_ctx->video_pix_fmt = AV_PIX_FMT_YUV420P;
+  br_ctx->audio_codec_id = AV_CODEC_ID_AAC;
   br_ctx->audio_sample_fmt = AV_SAMPLE_FMT_S16;
 
   // propagate the configuration
