@@ -24,6 +24,7 @@ void _init_ffmpeg() {
 void _init_device_time_base(FFmpegBridgeContext *br_ctx) {
   // timestamps from the device should be in microseconds
   br_ctx->device_time_base = av_malloc(sizeof(AVRational));
+  memset(br_ctx->device_time_base, 0, sizeof(AVRational));
   br_ctx->device_time_base->num = 1;
   br_ctx->device_time_base->den = 1000000;
 }
@@ -32,10 +33,11 @@ void _init_output_fmt_context(FFmpegBridgeContext *br_ctx) {
   int rc;
   AVOutputFormat *fmt;
 
-  LOGI("_init_output_fmt_context format: %s path: %s", br_ctx->output_fmt_name, br_ctx->output_url);
+  LOGI("_init_output_fmt_context:%p, format:%s, path:%s", br_ctx->output_fmt_ctx, br_ctx->output_fmt_name, br_ctx->output_url);
   rc = avformat_alloc_output_context2(&br_ctx->output_fmt_ctx, NULL, br_ctx->output_fmt_name, br_ctx->output_url);
   if (rc < 0) {
     LOGE("Error getting format context for output path: %s", av_err2str(rc));
+    return;
   }
 
   br_ctx->output_fmt_ctx->start_time_realtime = 0;
@@ -156,22 +158,32 @@ int _open_output_url(FFmpegBridgeContext *br_ctx){
   }
 }
 
+//static AVBitStreamFilterContext* bsfc = NULL;
 uint8_t* _filter_packet(FFmpegBridgeContext *br_ctx, AVStream *st, AVPacket *packet) {
   int rc = 0;
-  uint8_t *filtered_data;
+  uint8_t *filtered_data = NULL;
   int filtered_data_size = 0;
 
   if (st->codec->codec_id == br_ctx->audio_codec_id) {
     LOGD("About to filter audio packet buffer ...");
-    filtered_data = av_malloc(packet->size);
-    AVBitStreamFilterContext* bsfc = av_bitstream_filter_init("aac_adtstoasc");
-    if (!bsfc) {
+    
+    if(br_ctx->bsfc==NULL)
+    {
+    	br_ctx->bsfc = av_bitstream_filter_init("aac_adtstoasc");
+    }
+//    AVBitStreamFilterContext* bsfc = av_bitstream_filter_init("aac_adtstoasc");
+    if (!br_ctx->bsfc) {
       LOGE("Error creating aac_adtstoasc bitstream filter.");
     }
-    rc = av_bitstream_filter_filter(bsfc, st->codec, NULL,
+    rc = av_bitstream_filter_filter(br_ctx->bsfc, st->codec, NULL,
       &filtered_data, &filtered_data_size,
       packet->data, packet->size,
       packet->flags & AV_PKT_FLAG_KEY);
+/*      AVPacket new_pkt = *packet;
+      rc = av_bitstream_filter_filter(bsfc, st->codec, NULL,
+      &new_pkt.data, &new_pkt.size,
+      packet->data, packet->size,
+      packet->flags & AV_PKT_FLAG_KEY);*/
     if (rc < 0) {
       LOGE("ERROR: Failed to filter bitstream -- %s", av_err2str(rc));
     }
@@ -187,26 +199,31 @@ uint8_t* _filter_packet(FFmpegBridgeContext *br_ctx, AVStream *st, AVPacket *pac
 }
 
 void _rescale_packet(FFmpegBridgeContext *br_ctx, AVStream *st, AVPacket *packet) {
-  LOGD("time bases: stream=%d/%d, codec=%d/%d, device=%d/%d",
-    st->time_base.num, st->time_base.den,
-    st->codec->time_base.num, st->codec->time_base.den,
-    (*br_ctx->device_time_base).num, (*br_ctx->device_time_base).den);
+//  LOGD("time bases: stream=%d/%d, codec=%d/%d, device=%d/%d",
+//    st->time_base.num, st->time_base.den,
+//    st->codec->time_base.num, st->codec->time_base.den,
+//    (*br_ctx->device_time_base).num, (*br_ctx->device_time_base).den);
 
   packet->pts = av_rescale_q(packet->pts, *(br_ctx->device_time_base), st->time_base);
   packet->dts = av_rescale_q(packet->dts, *(br_ctx->device_time_base), st->time_base);
 }
 
-void _write_packet(FFmpegBridgeContext *br_ctx, AVPacket *packet) {
+int _write_packet(FFmpegBridgeContext *br_ctx, AVPacket *packet) {
   int rc;
 
-  LOGD("writing frame to stream %d: (pts=%lld, size=%d)",
-    packet->stream_index, packet->pts, packet->size);
+//  LOGD("start writing frame to stream %d: (pts=%lld, size=%d)",
+//    packet->stream_index, packet->pts, packet->size);
 
   rc = av_interleaved_write_frame(br_ctx->output_fmt_ctx, packet);
   if (rc < 0){
     LOGE("ERROR: _write_packet stream (stream %d) -- %s",
       packet->stream_index, av_err2str(rc));
   }
+
+//    LOGD("end writing frame to stream %d: (pts=%lld, size=%d)",
+//    packet->stream_index, packet->pts, packet->size);
+
+   return rc;
 }
 
 void _write_trailer(FFmpegBridgeContext *br_ctx){
@@ -216,7 +233,6 @@ void _write_trailer(FFmpegBridgeContext *br_ctx){
     LOGE("Error writing trailer: %s", av_err2str(rc));
   }
 }
-
 
 //
 //-- FFmpegBridgeContext API
@@ -237,6 +253,9 @@ FFmpegBridgeContext* ffmpbr_init(
 
   // allocate the memory
   FFmpegBridgeContext *br_ctx = av_malloc(sizeof(FFmpegBridgeContext));
+  memset(br_ctx, 0, sizeof(FFmpegBridgeContext));
+
+  br_ctx->bsfc = NULL;
 
   // defaults -- likely not overridden
   br_ctx->video_codec_id = AV_CODEC_ID_H264;
@@ -254,6 +273,7 @@ FFmpegBridgeContext* ffmpbr_init(
   br_ctx->audio_sample_rate = audio_sample_rate;
   br_ctx->audio_num_channels = audio_num_channels;
   br_ctx->audio_bit_rate = audio_bit_rate;
+  LOGD("===================output_fmt_name:%s, output_url:%s", output_fmt_name, output_url);
 
   // initialize FFmpeg
   _init_ffmpeg();
@@ -275,11 +295,14 @@ FFmpegBridgeContext* ffmpbr_init(
   rc = _open_output_url(br_ctx);
   if (rc < 0){
     LOGE("ERROR: ffmpbr_prepare_stream error -- %s", av_err2str(rc));
+    br_ctx->error = rc;
+    return br_ctx;
   }
 
   LOGD("logging (dumping) output_fmt_ctx log ...");
   avDumpFormat(br_ctx->output_fmt_ctx, 0, output_url, 1);
 
+  br_ctx->error = 0;
   return br_ctx;
 }
 
@@ -288,6 +311,7 @@ void ffmpbr_set_audio_codec_extradata(FFmpegBridgeContext *br_ctx, const int8_t 
 
   // this will automatically be freed by avformat_free_context() during ffmpbr_finalize()
   br_ctx->audio_stream->codec->extradata = av_malloc(codec_extradata_size);
+  memset(br_ctx->audio_stream->codec->extradata, 0, codec_extradata_size);
   br_ctx->audio_stream->codec->extradata_size = codec_extradata_size;
   memcpy(br_ctx->audio_stream->codec->extradata, codec_extradata, codec_extradata_size);
 
@@ -299,6 +323,7 @@ void ffmpbr_set_video_codec_extradata(FFmpegBridgeContext *br_ctx, const int8_t 
 
   // this will automatically be freed by avformat_free_context() during ffmpbr_finalize()
   br_ctx->video_stream->codec->extradata = av_malloc(codec_extradata_size);
+  memset(br_ctx->video_stream->codec->extradata, 0, codec_extradata_size);
   br_ctx->video_stream->codec->extradata_size = codec_extradata_size;
   memcpy(br_ctx->video_stream->codec->extradata, codec_extradata, codec_extradata_size);
 
@@ -313,16 +338,22 @@ void ffmpbr_write_header(FFmpegBridgeContext *br_ctx) {
   }
 }
 
-void ffmpbr_write_packet(FFmpegBridgeContext *br_ctx, uint8_t *data, int data_size, long pts,
+int ffmpbr_write_packet(FFmpegBridgeContext *br_ctx, uint8_t *data, int data_size, long pts,
     int is_video, int is_video_keyframe) {
   AVPacket *packet;
   AVStream *st;
   AVCodecContext *c;
   uint8_t *filtered_data = NULL, *keyframe_data = NULL;
 
+//  LOGI("ffmpbr_write_packet data_size:%d\n",data_size);
+
   packet = av_malloc(sizeof(AVPacket));
   if (!packet) {
     LOGE("ERROR: ffmpbr_write_packet couldn't allocate memory for the AVPacket");
+  }
+  else
+  {
+    memset(packet, 0, sizeof(AVPacket));
   }
   av_init_packet(packet);
 
@@ -347,21 +378,47 @@ void ffmpbr_write_packet(FFmpegBridgeContext *br_ctx, uint8_t *data, int data_si
   _rescale_packet(br_ctx, st, packet);
 
   // write the frame
-  _write_packet(br_ctx, packet);
+  int ret = 0;
+  ret = _write_packet(br_ctx, packet);
 
   // clean up
+//  LOGD("clean up");
+/*  
   if (filtered_data) {
     av_free(filtered_data);
-  }
+    filtered_data = NULL;
+  }*/
+
   if (keyframe_data) {
     av_free(keyframe_data);
   }
-  av_free_packet(packet);
+
+//  LOGD("av_free_packet");
+
+  if(!is_video)
+  {
+  	av_free_packet(packet);
+  }
+
+  av_free(packet);
+
+  return ret;
 }
 
 void ffmpbr_finalize(FFmpegBridgeContext *br_ctx) {
-  // write the file trailer
-  _write_trailer(br_ctx);
+  if(br_ctx==NULL) return;
+  
+ // write the file trailer
+ /* if(br_ctx->error==0)
+  {
+  	_write_trailer(br_ctx);
+  }*/
+
+  if(br_ctx->bsfc!=NULL)
+  {
+      av_bitstream_filter_close(br_ctx->bsfc);
+      br_ctx->bsfc=NULL;
+  }
 
   // close the output file
   if (!(br_ctx->output_fmt_ctx->oformat->flags & AVFMT_NOFILE)) {
@@ -374,4 +431,6 @@ void ffmpbr_finalize(FFmpegBridgeContext *br_ctx) {
   if (br_ctx->output_url) av_free(br_ctx->output_url);
   if (br_ctx->output_fmt_ctx) avformat_free_context(br_ctx->output_fmt_ctx);
   av_free(br_ctx);
+
+  br_ctx = NULL;
 }
