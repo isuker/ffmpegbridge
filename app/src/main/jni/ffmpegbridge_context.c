@@ -165,7 +165,7 @@ uint8_t* _filter_packet(FFmpegBridgeContext *br_ctx, AVStream *st, AVPacket *pac
   int filtered_data_size = 0;
 
   if (st->codec->codec_id == br_ctx->audio_codec_id) {
-    LOGD("About to filter audio packet buffer ...");
+//    LOGD("About to filter audio packet buffer ...");
     
     if(br_ctx->bsfc==NULL)
     {
